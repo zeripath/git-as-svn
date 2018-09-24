@@ -7,6 +7,11 @@
  */
 package svnserver.ext.gitea.auth;
 
+import java.net.HttpURLConnection;
+import java.util.Collection;
+import java.util.Collections;
+import java.util.Map;
+
 import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
 import org.slf4j.Logger;
@@ -22,11 +27,7 @@ import svnserver.auth.User;
 import svnserver.auth.UserDB;
 import svnserver.context.SharedContext;
 import svnserver.ext.gitea.config.GiteaContext;
-
-import java.net.HttpURLConnection;
-import java.util.Collection;
-import java.util.Collections;
-import java.util.Map;
+import svnserver.ext.gitea.keys.GiteaKeysMapper;
 
 /**
  * Gitea user authentiation.
@@ -37,14 +38,24 @@ import java.util.Map;
 public final class GiteaUserDB implements UserDB {
   @NotNull
   private static final Logger log = LoggerFactory.getLogger(GiteaUserDB.class);
+  @NotNull
+  private static final String PREFIX_USER = "user-";
+  @NotNull
+  private static final String PREFIX_KEY = "key-";
+
+  @NotNull
+  private String secretToken;
 
   @NotNull
   private final Collection<Authenticator> authenticators = Collections.singleton(new PlainAuthenticator(this));
   @NotNull
   private final GiteaContext context;
+  @NotNull
+  private GiteaKeysMapper keysMapper;
 
   GiteaUserDB(@NotNull SharedContext context) {
     this.context = context.sure(GiteaContext.class);
+    this.keysMapper = context.get(GiteaKeysMapper.class);
   }
 
   @NotNull
@@ -92,7 +103,7 @@ public final class GiteaUserDB implements UserDB {
       io.gitea.model.User user = userApi.userGet(userName);
       return createUser(user);
     } catch (ApiException e) {
-      if (e.getCode() != 404) {
+      if (e.getCode() != HttpURLConnection.HTTP_NOT_FOUND) {
         log.warn("User lookup by name error: " + userName, e);
       }
       return null;
@@ -102,23 +113,45 @@ public final class GiteaUserDB implements UserDB {
   @Nullable
   @Override
   public User lookupByExternal(@NotNull String external) {
-    final String userId = external;
+    final Long userId = removePrefix(external, PREFIX_USER);
     if (userId != null) {
       try {
-        Long uid = Long.parseLong(userId);
         final UserApi userApi = new UserApi(context.connect());
         UserSearchList users = userApi.userSearch(null, uid, null);
         for (io.gitea.model.User u : users.getData()) {
-          if (uid.equals(u.getId())) {
+          if (userId.equals(u.getId())) {
+            log.info("Matched {} with {}", external, u.getLogin());
             return createUser(u);
           }
         }
       } catch (ApiException e) {
-        if (e.getCode() != 404) {
+        if (e.getCode() != HttpURLConnection.HTTP_NOT_FOUND) {
           log.warn("User lookup by userId error: " + external, e);
         }
         return null;
       }
+    }
+    if (external.startsWith(PREFIX_KEY) && keysMapper != null) {
+      String userName = keysMapper.getUserName(external);
+      if (userName != null) {
+        log.info("Matched {} with {}", external, userName);
+        return lookupByUserName(userName);
+      }
+    }
+    log.info("Unable to match {}", external);
+    return null;
+  }
+
+  @Nullable
+  private Long removePrefix(@NotNull String glId, @NotNull String prefix) {
+    if (glId.startsWith(prefix)) {
+      long result = 0;
+      for (int i = prefix.length(); i < glId.length(); ++i) {
+        final char c = glId.charAt(i);
+        if (c < '0' || c > '9') return null;
+        result = result * 10 + (c - '0');
+      }
+      return result;
     }
     return null;
   }
